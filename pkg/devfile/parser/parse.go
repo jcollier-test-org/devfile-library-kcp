@@ -9,9 +9,6 @@ import (
 	"strings"
 
 	"github.com/devfile/library/pkg/util"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/clientcmd"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	devfileCtx "github.com/devfile/library/pkg/devfile/parser/context"
 	"github.com/devfile/library/pkg/devfile/parser/data"
@@ -80,8 +77,6 @@ type ParserArgs struct {
 	DefaultNamespace string
 	// Context is the context used for making Kubernetes requests
 	Context context.Context
-	// K8sClient is the Kubernetes client instance used for interacting with a cluster
-	K8sClient client.Client
 	// ExternalVariables override variables defined in the Devfile
 	ExternalVariables map[string]string
 }
@@ -106,7 +101,6 @@ func ParseDevfile(args ParserArgs) (d DevfileObj, err error) {
 		defaultNamespace: args.DefaultNamespace,
 		registryURLs:     args.RegistryURLs,
 		context:          args.Context,
-		k8sClient:        args.K8sClient,
 	}
 
 	flattenedDevfile := true
@@ -139,8 +133,6 @@ type resolverTools struct {
 	registryURLs []string
 	// Context is the context used for making Kubernetes or HTTP requests
 	context context.Context
-	// K8sClient is the Kubernetes client instance used for interacting with a cluster
-	k8sClient client.Client
 }
 
 func populateAndParseDevfile(d DevfileObj, resolveCtx *resolutionContextTree, tool resolverTools, flattenedDevfile bool) (DevfileObj, error) {
@@ -224,8 +216,6 @@ func parseParentAndPlugin(d DevfileObj, resolveCtx *resolutionContextTree, tool 
 				parentDevfileObj, err = parseFromURI(parent.ImportReference, d.Ctx, resolveCtx, tool)
 			case parent.Id != "":
 				parentDevfileObj, err = parseFromRegistry(parent.ImportReference, resolveCtx, tool)
-			case parent.Kubernetes != nil:
-				parentDevfileObj, err = parseFromKubeCRD(parent.ImportReference, resolveCtx, tool)
 			default:
 				return fmt.Errorf("devfile parent does not define any resources")
 			}
@@ -285,8 +275,6 @@ func parseParentAndPlugin(d DevfileObj, resolveCtx *resolutionContextTree, tool 
 				pluginDevfileObj, err = parseFromURI(plugin.ImportReference, d.Ctx, resolveCtx, tool)
 			case plugin.Id != "":
 				pluginDevfileObj, err = parseFromRegistry(plugin.ImportReference, resolveCtx, tool)
-			case plugin.Kubernetes != nil:
-				pluginDevfileObj, err = parseFromKubeCRD(plugin.ImportReference, resolveCtx, tool)
 			default:
 				return fmt.Errorf("plugin %s does not define any resources", component.Name)
 			}
@@ -422,52 +410,6 @@ func getDevfileFromRegistry(id, registryURL, version string) ([]byte, error) {
 		URL: fmt.Sprintf("%s/devfiles/%s/%s", registryURL, id, version),
 	}
 	return util.HTTPGetRequest(param, 0)
-}
-
-func parseFromKubeCRD(importReference v1.ImportReference, resolveCtx *resolutionContextTree, tool resolverTools) (d DevfileObj, err error) {
-
-	if tool.k8sClient == nil || tool.context == nil {
-		return DevfileObj{}, fmt.Errorf("Kubernetes client and context are required to parse from Kubernetes CRD")
-	}
-	namespace := importReference.Kubernetes.Namespace
-
-	if namespace == "" {
-		// if namespace is not set in devfile, use default namespace provided in by consumer
-		if tool.defaultNamespace != "" {
-			namespace = tool.defaultNamespace
-		} else {
-			// use current namespace if namespace is not set in devfile and not provided by consumer
-			loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-			configOverrides := &clientcmd.ConfigOverrides{}
-			config := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-			namespace, _, err = config.Namespace()
-			if err != nil {
-				return DevfileObj{}, fmt.Errorf("kubernetes namespace is not provided, and cannot get current running cluster's namespace: %v", err)
-			}
-		}
-	}
-
-	var dwTemplate v1.DevWorkspaceTemplate
-	namespacedName := types.NamespacedName{
-		Name:      importReference.Kubernetes.Name,
-		Namespace: namespace,
-	}
-	err = tool.k8sClient.Get(tool.context, namespacedName, &dwTemplate)
-	if err != nil {
-		return DevfileObj{}, err
-	}
-
-	d, err = convertDevWorskapceTemplateToDevObj(dwTemplate)
-	if err != nil {
-		return DevfileObj{}, err
-	}
-
-	importReference.Kubernetes.Namespace = namespace
-	newResolveCtx := resolveCtx.appendNode(importReference)
-
-	err = parseParentAndPlugin(d, newResolveCtx, tool)
-	return d, err
-
 }
 
 func convertDevWorskapceTemplateToDevObj(dwTemplate v1.DevWorkspaceTemplate) (d DevfileObj, err error) {
